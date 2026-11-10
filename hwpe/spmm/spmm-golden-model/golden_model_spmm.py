@@ -1,116 +1,146 @@
-import numpy as np
+#!/usr/bin/env python3
+"""Deterministic CSR x dense INT8 SpMM stimuli for the PULP HWPE test.
 
-def generate_spmm_stimuli():
-    # --- 1. CONFIGURAZIONE DEI PARAMETRI ---
-    num_rows = 16
-    num_cols = 16
-    sparsity = 0.6  # Percentuale di zeri nella matrice sparsa A
-    
-    print(f"[*] Generazione matrice sparsa A ({num_rows}x{num_cols}) con densità {1-sparsity}...")
-    
-    # Generazione di una matrice casuale con zeri (INT8 tra -8 e 7)
-    np.random.seed(42)
-    A_dense = np.random.choice([0, 1, 2, -1, -2], size=(num_rows, num_cols), p=[sparsity, (1-sparsity)/4, (1-sparsity)/4, (1-sparsity)/4, (1-sparsity)/4]).astype(np.int8)
-    
-    # Matrice densa B (INT8)
-    B = np.random.randint(-4, 4, size=(num_cols, 4), dtype=np.int8)
+A is MxK CSR (uint32 row_ptr, uint8 col_id, int8 values).
+B is KxN row-major signed INT8.
+C is MxN row-major signed INT32 (or saturated signed INT8 with --out-bits 8).
+Only the Python standard library is required.
+"""
 
-    # --- 2. CONVERSIONE IN FORMATO CSR ---
+import argparse
+import random
+from pathlib import Path
+
+
+def sat8(v):
+    return max(-128, min(127, v))
+
+
+def generate(rows, cols, b_cols, sparsity, seed, out_bits, empty_row=-1):
+    if not (1 <= rows <= 65535):
+        raise ValueError("M must be in [1, 65535] to fit the HWPE register")
+    if not (1 <= cols <= 255):
+        raise ValueError("K must be in [1, 255] because col_id is uint8_t")
+    if not (1 <= b_cols <= 65535):
+        raise ValueError("N must be positive")
+    if not (0.0 <= sparsity <= 1.0):
+        raise ValueError("sparsity must be in [0,1]")
+    if out_bits not in (8, 32):
+        raise ValueError("out_bits must be 8 or 32")
+    if empty_row != -1 and not (0 <= empty_row < rows):
+        raise ValueError("empty_row must be -1 or a valid row")
+
+    rng = random.Random(seed)
+    dense_a = []
+    for r in range(rows):
+        dense_a.append([0 if (r == empty_row or rng.random() < sparsity)
+                        else rng.choice((-2, -1, 1, 2)) for _ in range(cols)])
+    b = [[rng.randrange(-4, 4) for _ in range(b_cols)] for _ in range(cols)]
+
     row_ptr = [0]
-    data_a = []
     col_id = []
+    data_a = []
+    for row in dense_a:
+        for j, value in enumerate(row):
+            if value != 0:
+                col_id.append(j)
+                data_a.append(value)
+        row_ptr.append(len(data_a))
 
-    for i in range(num_rows):
-        nnz_in_row = 0
-        for j in range(num_cols):
-            val = A_dense[i, j]
-            if val != 0:
-                data_a.append(int(val))
-                col_id.append(int(j))
-                nnz_in_row += 1
-        row_ptr.append(row_ptr[-1] + nnz_in_row)
+    # Independent dense computation: no CSR iteration used in this reference.
+    golden = []
+    for i in range(rows):
+        for j in range(b_cols):
+            acc = sum(dense_a[i][k] * b[k][j] for k in range(cols))
+            golden.append(sat8(acc) if out_bits == 8 else acc)
+    return row_ptr, col_id, data_a, [x for row in b for x in row], golden
 
-    total_nnz = len(data_a)
-    print(f"[*] Totale elementi non-zero (NNZ): {total_nnz}")
 
-    # --- 3. CALCOLO GOLDEN MODEL (C = A * B) ---
-    C_golden = np.dot(A_dense.astype(np.int32), B.astype(np.int32))
-    C_golden = np.clip(C_golden, -128, 127).astype(np.int8)
+def header_array(name, c_type, values):
+    """Emit safe C even for an empty CSR: one physical padding element."""
+    physical = values if values else [0]
+    lines = []
+    for i in range(0, len(physical), 12):
+        lines.append("  " + ", ".join(str(x) for x in physical[i:i + 12]))
+    initializer = ",\n".join(lines)
+    return ("#include <stdint.h>\n"
+            "static const " + c_type + " " + name + "[" + str(len(physical)) + "]"
+            " __attribute__((aligned(16))) = {\n" + initializer + "\n};\n")
 
-    # --- 4. ESPORTAZIONE IN FORMATO ESADECIMALE (`stim_data.txt`) ---
-    output_filename = "stim_data.txt"
-    print(f"[*] Scrittura dei file di stimolo in {output_filename}...")
 
-    with open(output_filename, "w") as f:
-        f.write("// --- ROW_PTR ---\n")
-        for ptr in row_ptr:
-            f.write(f"{ptr:08x}\n")
-            
-        f.write("// --- COL_ID ---\n")
-        for cid in col_id:
-            f.write(f"{cid:08x}\n")
-            
-        f.write("// --- DATA_A (NNZ values) ---\n")
-        for val in data_a:
-            # Conversione esplicita in int Python per evitare overflow NumPy
-            hex_val = int(val) & 0xFF
-            f.write(f"{hex_val:08x}\n")
-            
-        f.write("// --- MATRIX B ---\n")
-        for row in B:
-            for val in row:
-                hex_val = int(val) & 0xFF
-                f.write(f"{hex_val:08x}\n")
+def save(outdir, rows, cols, b_cols, out_bits, arrays):
+    row_ptr, col_id, data_a, b, golden = arrays
+    outdir.mkdir(parents=True, exist_ok=True)
+    dims = ("/* Generated by golden_model_spmm.py; do not edit by hand. */\n"
+            "#ifndef SPMM_TENSOR_DIM_H\n#define SPMM_TENSOR_DIM_H\n"
+            f"#define SPMM_M {rows}u\n"
+            f"#define SPMM_K {cols}u\n"
+            f"#define SPMM_N {b_cols}u\n"
+            f"#define TOTAL_NNZ {len(data_a)}u\n"
+            f"#define TOTAL_PTRS {len(row_ptr)}u\n"
+            f"#define SPMM_OUT_BITS {out_bits}\n"
+            "#define NUM_ROWS SPMM_M\n#define NUM_COLS SPMM_K\n"
+            "#define NUM_B_COLS SPMM_N\n"
+            "#endif /* SPMM_TENSOR_DIM_H */\n")
+    files = {
+        "tensor_dim.h": dims,
+        "row_ptr_input.h": header_array("row_ptr_inp", "uint32_t", row_ptr),
+        "col_id_input.h": header_array("col_id_inp", "uint8_t", col_id),
+        "a_input.h": header_array("a_inp", "int8_t", data_a),
+        "b_input.h": header_array("b_inp", "int8_t", b),
+        "golden.h": header_array("golden", "int32_t", golden),
+    }
+    for name, contents in files.items():
+        (outdir / name).write_text(contents, encoding="utf-8")
 
-        f.write("// --- GOLDEN OUTPUT C ---\n")
-        for row in C_golden:
-            for val in row:
-                hex_val = int(val) & 0xFF
-                f.write(f"{hex_val:08x}\n")
 
-    # --- 5. ESPORTAZIONE DEI FILE HEADER C (.h) PER LA CARTELLA sw/ ---
-    print("[*] Generazione dei file header C (.h)...")
+def self_test():
+    cases = [
+        (16, 16, 4, 0.6, 42, 32, -1),
+        (4, 7, 4, 0.0, 1, 32, -1),
+        (4, 7, 4, 1.0, 1, 32, 2),
+        (8, 11, 4, 0.9, 8, 8, 3),
+        (1, 1, 1, 0.0, 1, 8, -1),
+        (4, 255, 4, 0.1, 6, 8, 0),
+    ]
+    for rows, cols, n, sparse, seed, bits, empty in cases:
+        ptr, idx, vals, b, gold = generate(rows, cols, n, sparse, seed, bits, empty)
+        assert len(ptr) == rows + 1 and ptr[0] == 0 and ptr[-1] == len(idx) == len(vals)
+        assert len(b) == cols * n and len(gold) == rows * n
+        for r in range(rows):
+            assert ptr[r] <= ptr[r+1]
+            if r == empty:
+                assert ptr[r] == ptr[r+1]
+            for j in range(n):
+                v = sum(vals[p] * b[idx[p] * n + j]
+                        for p in range(ptr[r], ptr[r+1]))
+                assert gold[r * n + j] == (sat8(v) if bits == 8 else v)
+    print("[OK] 6 CSR/golden reference tests passed (including empty rows and INT8 clipping)")
 
-    # tensor_dim.h
-    with open("tensor_dim.h", "w") as f:
-        f.write("#ifndef TENSOR_DIM_H\n#define TENSOR_DIM_H\n\n")
-        f.write(f"#define NUM_ROWS {num_rows}\n")
-        f.write(f"#define NUM_COLS {num_cols}\n")
-        f.write(f"#define TOTAL_NNZ {total_nnz}\n")
-        f.write(f"#define TOTAL_PTRS {len(row_ptr)}\n\n")
-        f.write("#endif\n")
 
-    # row_ptr_input.h
-    with open("row_ptr_input.h", "w") as f:
-        f.write("#include <stdint.h>\n\n")
-        f.write(f"const uint32_t row_ptr_inp[{len(row_ptr)}] = {{\n")
-        f.write(", ".join([str(p) for p in row_ptr]) + "\n};\n")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rows", type=int, default=16, help="M: rows of sparse A")
+    parser.add_argument("--cols", type=int, default=16, help="K: columns of A / rows of B (<=255)")
+    parser.add_argument("--b-cols", type=int, default=4, help="N: columns of dense B")
+    parser.add_argument("--sparsity", type=float, default=0.6)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--out-bits", type=int, choices=(8, 32), default=32)
+    parser.add_argument("--empty-row", type=int, default=-1,
+                        help="optional row index to force empty, or -1 for none")
+    parser.add_argument("--output-dir", type=Path, default=Path("inc"))
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
 
-    # col_id_input.h
-    with open("col_id_input.h", "w") as f:
-        f.write("#include <stdint.h>\n\n")
-        f.write(f"const uint8_t col_id_inp[{len(col_id)}] = {{\n")
-        f.write(", ".join([str(c) for c in col_id]) + "\n};\n")
+    if args.self_test:
+        self_test()
+        return
+    arrays = generate(args.rows, args.cols, args.b_cols, args.sparsity,
+                      args.seed, args.out_bits, args.empty_row)
+    save(args.output_dir, args.rows, args.cols, args.b_cols, args.out_bits, arrays)
+    print(f"[OK] Generated {args.rows}x{args.cols} CSR A (nnz={len(arrays[2])}), "
+          f"{args.cols}x{args.b_cols} B, C signed INT{args.out_bits} in {args.output_dir}")
 
-    # a_input.h
-    with open("a_input.h", "w") as f:
-        f.write("#include <stdint.h>\n\n")
-        f.write(f"const int8_t a_inp[{len(data_a)}] = {{\n")
-        f.write(", ".join([str(val) for val in data_a]) + "\n};\n")
-
-    # b_input.h
-    with open("b_input.h", "w") as f:
-        f.write("#include <stdint.h>\n\n")
-        f.write(f"const int8_t b_inp[{B.size}] = {{\n")
-        f.write(", ".join([str(val) for val in B.flatten()]) + "\n};\n")
-
-    # golden.h
-    with open("golden.h", "w") as f:
-        f.write("#include <stdint.h>\n\n")
-        f.write(f"const int golden[{C_golden.size}] = {{\n")
-        f.write(", ".join([str(val) for val in C_golden.flatten()]) + "\n};\n")
-
-    print("[+] Golden Model eseguito con successo! File di testo e header .h generati.")
 
 if __name__ == "__main__":
-    generate_spmm_stimuli()
+    main()

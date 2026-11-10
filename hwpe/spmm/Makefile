@@ -1,35 +1,49 @@
+# PULP cluster HWPE regression test (same SDK invocation as hwpe/redmule).
 PULP_APP = test
-PULP_APP_SRCS = redmule.c
-PULP_CFLAGS = -O3
+PULP_APP_SRCS = spmm.c
+PULP_CFLAGS += -O3
 
 ifeq ($(use_dma),1)
- PULP_CFLAGS += -DUSE_DMA
+  PULP_CFLAGS += -DUSE_DMA
 endif
 ifeq ($(no_ecc),1)
- PULP_CFLAGS += -DNO_ECC
+  PULP_CFLAGS += -DNO_ECC
 endif
+ifeq ($(polling),1)
+  PULP_CFLAGS += -DSPMM_USE_POLLING -DSPMM_POLL_TIMEOUT=$(poll_timeout)
+endif
+poll_timeout ?= 10000000
 
 ifeq ($(fault_inject),1)
   export FAULT_INJECTION=1
   export FAULT_INJECTION_SCRIPT=$(CURDIR)/pulp_inject_fault.tcl
 endif
-
 ifeq ($(multi_bit_upset),1)
   export MULTI_BIT_UPSET=1
 else
   export MULTI_BIT_UPSET=0
 endif
 
-include $(PULP_SDK_HOME)/install/rules/pulp_rt.mk
+# make golden / check-golden can be run on any host without a PULP SDK.
+ifneq ($(filter-out golden check-golden,$(MAKECMDGOALS)),)
+  include $(PULP_SDK_HOME)/install/rules/pulp_rt.mk
+else ifeq ($(MAKECMDGOALS),)
+  include $(PULP_SDK_HOME)/install/rules/pulp_rt.mk
+endif
 
-Golden := redmule-golden-model
+PYTHON ?= python3
+M ?= 16
+K ?= 16
+N ?= 4
+SPARSITY ?= 0.60
+SEED ?= 42
+OUT_BITS ?= 32
+EMPTY_ROW ?= -1
 
-OP     ?= gemm
-M      ?= 32
-N      ?= 32
-K      ?= 32
-fp_fmt ?= FP16
-SW     ?= $(shell pwd)
-
+.PHONY: golden check-golden
+# M = rows of A, K = columns of A / rows of B, N = columns of B.
 golden:
-	$(MAKE) -C $(Golden) $(OP) SW=$(SW)/inc M=$(M) N=$(N) K=$(K) fp_fmt=$(fp_fmt)
+	$(PYTHON) spmm-golden-model/golden_model_spmm.py --rows $(M) --cols $(K) --b-cols $(N) --sparsity $(SPARSITY) --seed $(SEED) --out-bits $(OUT_BITS) --empty-row $(EMPTY_ROW) --output-dir inc
+
+check-golden:
+	$(PYTHON) spmm-golden-model/golden_model_spmm.py --self-test
