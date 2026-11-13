@@ -15,7 +15,7 @@ typedef int8_t spmm_output_t;
 #endif
 
 /* Check every CSR index and boundary before submitting addresses to HW. */
-static inline int spmm_check_csr(const uint32_t *ptr, const uint8_t *col)
+static inline int spmm_check_csr(const uint8_t *ptr, const uint8_t *col)
 {
   unsigned int errors = 0;
   unsigned int r, i;
@@ -48,11 +48,13 @@ static inline int spmm_compare(const volatile spmm_output_t *actual,
   unsigned int i;
   for (i = 0; i < count; ++i) {
     const int32_t got = (int32_t)actual[i];
-    if (got != expected[i]) {
+    const int32_t exp = (SPMM_OUT_BITS == 8) ? (int32_t)(int8_t)expected[i]
+                                             : expected[i];
+    if (got != exp) {
       if (errors < 16u) {
         printf("[SPMM] C[%u,%u]: expected=%ld got=%ld\n",
                (unsigned)(i / SPMM_N), (unsigned)(i % SPMM_N),
-               (long)expected[i], (long)got);
+               (long)exp, (long)got);
       }
       ++errors;
     }

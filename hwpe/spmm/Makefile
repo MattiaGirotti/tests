@@ -9,10 +9,12 @@ endif
 ifeq ($(no_ecc),1)
   PULP_CFLAGS += -DNO_ECC
 endif
+# Start with bounded polling until the event route has been verified.
+polling ?= 1
+poll_timeout ?= 1000000
 ifeq ($(polling),1)
   PULP_CFLAGS += -DSPMM_USE_POLLING -DSPMM_POLL_TIMEOUT=$(poll_timeout)
 endif
-poll_timeout ?= 10000000
 
 ifeq ($(fault_inject),1)
   export FAULT_INJECTION=1
@@ -34,10 +36,10 @@ endif
 PYTHON ?= python3
 M ?= 16
 K ?= 16
-N ?= 4
+N ?= 16
 SPARSITY ?= 0.60
 SEED ?= 42
-OUT_BITS ?= 32
+OUT_BITS ?= 8
 EMPTY_ROW ?= -1
 
 .PHONY: golden check-golden
@@ -47,3 +49,10 @@ golden:
 
 check-golden:
 	$(PYTHON) spmm-golden-model/golden_model_spmm.py --self-test
+
+# The regression runner invokes "make clean all run" (not "make golden").
+# Make golden an explicit prerequisite of all, and also of the source, so the
+# generated headers always match the selected matrix/build parameters.
+.PHONY: all
+all: golden
+spmm.c: golden

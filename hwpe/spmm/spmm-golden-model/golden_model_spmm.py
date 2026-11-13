@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic CSR x dense INT8 SpMM stimuli for the PULP HWPE test.
 
-A is MxK CSR (uint32 row_ptr, uint8 col_id, int8 values).
+A is MxK CSR (uint8 row_ptr, uint8 col_id, int8 values; NNZ <= 255).
 B is KxN row-major signed INT8.
-C is MxN row-major signed INT32 (or saturated signed INT8 with --out-bits 8).
+C is MxN row-major signed INT32 (or wrapping signed INT8 with --out-bits 8).
 Only the Python standard library is required.
 """
 
@@ -12,8 +12,16 @@ import random
 from pathlib import Path
 
 
-def sat8(v):
-    return max(-128, min(127, v))
+def wrap8(v):
+    """Two's-complement INT8 wrap, matching the current 8-bit MAC accumulator."""
+    v &= 0xFF
+    return v if v < 0x80 else v - 0x100
+
+
+def pad_to_word(values, word_bytes=16):
+    """Pad byte streams to a complete 128-bit transfer; keep at least one beat."""
+    padded_len = max(word_bytes, ((len(values) + word_bytes - 1) // word_bytes) * word_bytes)
+    return list(values) + [0] * (padded_len - len(values))
 
 
 def generate(rows, cols, b_cols, sparsity, seed, out_bits, empty_row=-1):
@@ -47,12 +55,15 @@ def generate(rows, cols, b_cols, sparsity, seed, out_bits, empty_row=-1):
                 data_a.append(value)
         row_ptr.append(len(data_a))
 
+    if len(data_a) > 255:
+        raise ValueError("total NNZ must be <=255: the current RTL stores row pointers in uint8_t")
+
     # Independent dense computation: no CSR iteration used in this reference.
     golden = []
     for i in range(rows):
         for j in range(b_cols):
             acc = sum(dense_a[i][k] * b[k][j] for k in range(cols))
-            golden.append(sat8(acc) if out_bits == 8 else acc)
+            golden.append(wrap8(acc) if out_bits == 8 else acc)
     return row_ptr, col_id, data_a, [x for row in b for x in row], golden
 
 
@@ -79,15 +90,21 @@ def save(outdir, rows, cols, b_cols, out_bits, arrays):
             f"#define TOTAL_NNZ {len(data_a)}u\n"
             f"#define TOTAL_PTRS {len(row_ptr)}u\n"
             f"#define SPMM_OUT_BITS {out_bits}\n"
+            "#define SPMM_STREAM_WORD_BYTES 16u\n"
+            "#define SPMM_ROW_PTR_WORDS ((TOTAL_PTRS + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
+            "#define SPMM_B_WORDS ((SPMM_K * SPMM_N + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
+            "#define SPMM_NNZ_WORDS ((TOTAL_NNZ + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
             "#define NUM_ROWS SPMM_M\n#define NUM_COLS SPMM_K\n"
             "#define NUM_B_COLS SPMM_N\n"
             "#endif /* SPMM_TENSOR_DIM_H */\n")
+    # The streamer fetches full 128-bit beats. Pad all input arrays in the
+    # generated headers so its final beat never reads beyond the allocated L1 data.
     files = {
         "tensor_dim.h": dims,
-        "row_ptr_input.h": header_array("row_ptr_inp", "uint32_t", row_ptr),
-        "col_id_input.h": header_array("col_id_inp", "uint8_t", col_id),
-        "a_input.h": header_array("a_inp", "int8_t", data_a),
-        "b_input.h": header_array("b_inp", "int8_t", b),
+        "row_ptr_input.h": header_array("row_ptr_inp", "uint8_t", pad_to_word(row_ptr)),
+        "col_id_input.h": header_array("col_id_inp", "uint8_t", pad_to_word(col_id)),
+        "a_input.h": header_array("a_inp", "int8_t", pad_to_word(data_a)),
+        "b_input.h": header_array("b_inp", "int8_t", pad_to_word(b)),
         "golden.h": header_array("golden", "int32_t", golden),
     }
     for name, contents in files.items():
@@ -96,12 +113,12 @@ def save(outdir, rows, cols, b_cols, out_bits, arrays):
 
 def self_test():
     cases = [
-        (16, 16, 4, 0.6, 42, 32, -1),
+        (16, 16, 16, 0.6, 42, 8, -1),
         (4, 7, 4, 0.0, 1, 32, -1),
         (4, 7, 4, 1.0, 1, 32, 2),
         (8, 11, 4, 0.9, 8, 8, 3),
         (1, 1, 1, 0.0, 1, 8, -1),
-        (4, 255, 4, 0.1, 6, 8, 0),
+        (4, 255, 4, 0.99, 6, 8, 0),
     ]
     for rows, cols, n, sparse, seed, bits, empty in cases:
         ptr, idx, vals, b, gold = generate(rows, cols, n, sparse, seed, bits, empty)
@@ -114,18 +131,18 @@ def self_test():
             for j in range(n):
                 v = sum(vals[p] * b[idx[p] * n + j]
                         for p in range(ptr[r], ptr[r+1]))
-                assert gold[r * n + j] == (sat8(v) if bits == 8 else v)
-    print("[OK] 6 CSR/golden reference tests passed (including empty rows and INT8 clipping)")
+                assert gold[r * n + j] == (wrap8(v) if bits == 8 else v)
+    print("[OK] 6 CSR/golden reference tests passed (including empty rows and INT8 wrap)")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, default=16, help="M: rows of sparse A")
     parser.add_argument("--cols", type=int, default=16, help="K: columns of A / rows of B (<=255)")
-    parser.add_argument("--b-cols", type=int, default=4, help="N: columns of dense B")
+    parser.add_argument("--b-cols", type=int, default=16, help="N: columns of dense B")
     parser.add_argument("--sparsity", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out-bits", type=int, choices=(8, 32), default=32)
+    parser.add_argument("--out-bits", type=int, choices=(8, 32), default=8)
     parser.add_argument("--empty-row", type=int, default=-1,
                         help="optional row index to force empty, or -1 for none")
     parser.add_argument("--output-dir", type=Path, default=Path("inc"))

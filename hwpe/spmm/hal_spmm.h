@@ -24,7 +24,10 @@ static inline void spmm_cg_enable(void)
 {
   volatile uint32_t *ctrl = (volatile uint32_t *)(uintptr_t)
       (SPMM_CLUSTER_CTRL_BASE + SPMM_CLUST_CTRL_HWPE_EN_OFFSET);
-  *ctrl |= SPMM_CLUST_CTRL_HWPE_EN_MASK;
+  *ctrl = (*ctrl & ~SPMM_CLUST_CTRL_HWPE_SEL_MASK) |
+          ((SPMM_HWPE_INDEX << SPMM_CLUST_CTRL_HWPE_SEL_SHIFT) &
+           SPMM_CLUST_CTRL_HWPE_SEL_MASK) |
+          SPMM_CLUST_CTRL_HWPE_EN_MASK;
 }
 
 static inline void spmm_cg_disable(void)
@@ -48,28 +51,29 @@ static inline int32_t spmm_acquire_job(void)
 
 static inline int32_t spmm_wait_acquire(void)
 {
+  uint32_t timeout = (uint32_t)SPMM_POLL_TIMEOUT;
   int32_t job_id;
   do {
     job_id = spmm_acquire_job();
-    if (job_id < 0) {
+    if (job_id >= 0) return job_id;
 #ifndef SPMM_USE_POLLING
-      eu_evt_maskWaitAndClr(1u << SPMM_HWPE_EVENT);
+    eu_evt_maskWaitAndClr(1u << SPMM_HWPE_EVENT);
 #endif
-    }
-  } while (job_id < 0);
-  return job_id;
+  } while (timeout-- != 0u);
+  return -1;
 }
 
 static inline void spmm_configure(uint32_t row_ptr, uint32_t b,
                                    uint32_t a, uint32_t col_id,
-                                   uint32_t c, uint16_t m, uint16_t k)
+                                   uint32_t c, uint16_t row_ptr_words,
+                                   uint16_t b_words)
 {
   spmm_reg_write(SPMM_ROW_PTR_ADDR_OFFSET, row_ptr);
   spmm_reg_write(SPMM_B_ADDR_OFFSET, b);
   spmm_reg_write(SPMM_A_ADDR_OFFSET, a);
   spmm_reg_write(SPMM_COL_ID_ADDR_OFFSET, col_id);
   spmm_reg_write(SPMM_C_ADDR_OFFSET, c);
-  spmm_reg_write(SPMM_LENGTHS_OFFSET, SPMM_PACK_LENGTHS(m, k));
+  spmm_reg_write(SPMM_LENGTHS_OFFSET, SPMM_PACK_LENGTHS(row_ptr_words, b_words));
 }
 
 static inline void spmm_trigger_job(void)
@@ -82,21 +86,37 @@ static inline uint32_t spmm_status(void)
   return spmm_reg_read(SPMM_HWPE_STATUS_OFFSET);
 }
 
+static inline uint32_t spmm_running_job(void)
+{
+  return spmm_reg_read(SPMM_HWPE_RUNNING_JOB_OFFSET);
+}
+
 static inline int spmm_wait_done(void)
 {
 #ifdef SPMM_USE_POLLING
-  /* Polling is useful during bring-up when IRQ/event routing is not ready. */
+  /*
+   * STATUS is zero while idle. The commit/trigger path takes a few cycles,
+   * therefore waiting only for STATUS==0 can return before the job starts.
+   * Require observing busy first, then the transition back to idle.
+   */
   uint32_t timeout = (uint32_t)SPMM_POLL_TIMEOUT;
-  while (spmm_status() != 0u) {
-    if (timeout-- == 0u) return -1;
+  int seen_busy = 0;
+  while (timeout-- != 0u) {
+    const uint32_t status = spmm_status();
+    if (status != 0u) {
+      seen_busy = 1;
+    } else if (seen_busy) {
+      return 0;
+    }
   }
+  return -1;
 #else
   /* RedMulE-style event wait. Event 12 must be routed from SpMM. */
   do {
     eu_evt_maskWaitAndClr(1u << SPMM_HWPE_EVENT);
   } while (spmm_status() != 0u);
-#endif
   return 0;
+#endif
 }
 
 /* Optional MCHAN copy from L2 to TCDM, adapted from RedMulE. */
