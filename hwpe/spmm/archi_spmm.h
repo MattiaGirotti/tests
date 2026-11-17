@@ -36,8 +36,8 @@
 #define SPMM_C_ADDR_OFFSET             (SPMM_JOB_REG_OFFSET + 0x10)
 #define SPMM_LENGTHS_OFFSET            (SPMM_JOB_REG_OFFSET + 0x14)
 
-/* SystemRDL LENGTHS: [15:0] row_ptr 128-bit words,
- * [31:16] dense-B 128-bit words. */
+/* SystemRDL LENGTHS: [15:0] row_ptr 256-bit words,
+ * [31:16] dense-B 256-bit words. */
 #ifndef SPMM_PACK_LENGTHS
 #define SPMM_PACK_LENGTHS(row_ptr_words, b_words) \
   ((((uint32_t)(b_words)) << 16) | (uint32_t)(row_ptr_words))
@@ -70,7 +70,7 @@
 
 /* PULP HWPE traffic normally accesses L1/TCDM. */
 #ifndef SPMM_BUFFER_ALIGNMENT
-#define SPMM_BUFFER_ALIGNMENT         16u
+#define SPMM_BUFFER_ALIGNMENT         32u
 #endif
 
 /* Optional polling timeout (number of MMIO reads). */

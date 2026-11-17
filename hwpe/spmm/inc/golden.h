@@ -1,5 +1,5 @@
 #include <stdint.h>
-static const int32_t golden[256] __attribute__((aligned(16))) = {
+static const int8_t golden[256] __attribute__((aligned(16))) = {
   -5, -3, -15, 9, -18, -6, 12, -1, 0, -9, -17, -10,
   -4, -14, -2, 3, -1, 16, -10, 11, -7, 13, 23, -16,
   -13, 0, 1, -19, 1, -8, -16, -13, 9, -4, 14, -1,

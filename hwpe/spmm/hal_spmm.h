@@ -63,17 +63,46 @@ static inline int32_t spmm_wait_acquire(void)
   return -1;
 }
 
-static inline void spmm_configure(uint32_t row_ptr, uint32_t b,
-                                   uint32_t a, uint32_t col_id,
-                                   uint32_t c, uint16_t row_ptr_words,
-                                   uint16_t b_words)
+static inline void spmm_configure(
+    const volatile void *row_ptr,
+    const volatile void *b,
+    const volatile void *a,
+    const volatile void *col_id,
+    const volatile void *c,
+    uint16_t row_ptr_words,
+    uint16_t b_words
+)
 {
-  spmm_reg_write(SPMM_ROW_PTR_ADDR_OFFSET, row_ptr);
-  spmm_reg_write(SPMM_B_ADDR_OFFSET, b);
-  spmm_reg_write(SPMM_A_ADDR_OFFSET, a);
-  spmm_reg_write(SPMM_COL_ID_ADDR_OFFSET, col_id);
-  spmm_reg_write(SPMM_C_ADDR_OFFSET, c);
-  spmm_reg_write(SPMM_LENGTHS_OFFSET, SPMM_PACK_LENGTHS(row_ptr_words, b_words));
+    /* HWPE address registers are 32-bit */
+    spmm_reg_write(
+        SPMM_ROW_PTR_ADDR_OFFSET,
+        (uint32_t)(uintptr_t)row_ptr
+    );
+
+    spmm_reg_write(
+        SPMM_B_ADDR_OFFSET,
+        (uint32_t)(uintptr_t)b
+    );
+
+    spmm_reg_write(
+        SPMM_A_ADDR_OFFSET,
+        (uint32_t)(uintptr_t)a
+    );
+
+    spmm_reg_write(
+        SPMM_COL_ID_ADDR_OFFSET,
+        (uint32_t)(uintptr_t)col_id
+    );
+
+    spmm_reg_write(
+        SPMM_C_ADDR_OFFSET,
+        (uint32_t)(uintptr_t)c
+    );
+
+    spmm_reg_write(
+        SPMM_LENGTHS_OFFSET,
+        SPMM_PACK_LENGTHS(row_ptr_words, b_words)
+    );
 }
 
 static inline void spmm_trigger_job(void)

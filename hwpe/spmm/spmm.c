@@ -114,7 +114,7 @@ int main(void)
          * Allocate buffers in L1/TCDM
          *
          * Buffers are aligned because the streamer fetches
-         * complete 128-bit beats.
+         * complete 256-bit beats.
          * -------------------------------------------------------- */
 
         row_ptr = (uint8_t *)spmm_l1_alloc(sizeof(row_ptr_inp));
