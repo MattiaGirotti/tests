@@ -1,4 +1,4 @@
-# PULP cluster HWPE regression test (same SDK invocation as hwpe/redmule).
+# PULP cluster HWPE regression: 32x32 SpMM with RTL-managed tiling and a 16x16 engine.
 PULP_APP = test
 PULP_APP_SRCS = spmm.c
 PULP_CFLAGS += -O3
@@ -9,7 +9,6 @@ endif
 ifeq ($(no_ecc),1)
   PULP_CFLAGS += -DNO_ECC
 endif
-# Start with bounded polling until the event route has been verified.
 polling ?= 1
 poll_timeout ?= 1000000
 ifeq ($(polling),1)
@@ -26,7 +25,6 @@ else
   export MULTI_BIT_UPSET=0
 endif
 
-# make golden / check-golden can be run on any host without a PULP SDK.
 ifneq ($(filter-out golden check-golden,$(MAKECMDGOALS)),)
   include $(PULP_SDK_HOME)/install/rules/pulp_rt.mk
 else ifeq ($(MAKECMDGOALS),)
@@ -34,25 +32,21 @@ else ifeq ($(MAKECMDGOALS),)
 endif
 
 PYTHON ?= python3
-M ?= 16
-K ?= 16
-N ?= 16
+M ?= 32
+K ?= 32
+N ?= 32
 SPARSITY ?= 0.60
 SEED ?= 42
 OUT_BITS ?= 8
 EMPTY_ROW ?= -1
 
-.PHONY: golden check-golden
-# M = rows of A, K = columns of A / rows of B, N = columns of B.
+.PHONY: golden check-golden all
+# M/K/N must be 32 for the current RTL tile-controller configuration.
 golden:
 	$(PYTHON) spmm-golden-model/golden_model_spmm.py --rows $(M) --cols $(K) --b-cols $(N) --sparsity $(SPARSITY) --seed $(SEED) --out-bits $(OUT_BITS) --empty-row $(EMPTY_ROW) --output-dir inc
 
 check-golden:
 	$(PYTHON) spmm-golden-model/golden_model_spmm.py --self-test
 
-# The regression runner invokes "make clean all run" (not "make golden").
-# Make golden an explicit prerequisite of all, and also of the source, so the
-# generated headers always match the selected matrix/build parameters.
-.PHONY: all
 all: golden
 spmm.c: golden

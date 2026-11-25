@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 """Deterministic CSR x dense INT8 SpMM stimuli for the PULP HWPE test.
 
-A is MxK CSR (uint8 row_ptr, uint8 col_id, int8 values; NNZ <= 255).
+A is MxK CSR (uint16 row_ptr, uint8 col_id, int8 values; NNZ <= 65535).
 B is KxN row-major signed INT8.
 C is MxN row-major signed INT8, using two's-complement wrap-around.
 Only the Python standard library is required.
@@ -19,11 +19,14 @@ def wrap8(v):
     return v if v < 0x80 else v - 0x100
 
 
-def pad_to_word(values, word_bytes=16):
-    """Pad byte streams to a complete 128-bit transfer; keep at least one beat."""
+def pad_to_word(values, word_bytes=32, element_bytes=1):
+    """Pad an array to a complete 256-bit beat, respecting its C element size."""
+    if word_bytes % element_bytes:
+        raise ValueError("word_bytes must be divisible by element_bytes")
+    elems_per_word = word_bytes // element_bytes
     padded_len = max(
-        word_bytes,
-        ((len(values) + word_bytes - 1) // word_bytes) * word_bytes,
+        elems_per_word,
+        ((len(values) + elems_per_word - 1) // elems_per_word) * elems_per_word,
     )
     return list(values) + [0] * (padded_len - len(values))
 
@@ -70,10 +73,8 @@ def generate(rows, cols, b_cols, sparsity, seed, out_bits=8, empty_row=-1):
                 data_a.append(value)
         row_ptr.append(len(data_a))
 
-    if len(data_a) > 255:
-        raise ValueError(
-            "total NNZ must be <=255: the current RTL stores row pointers in uint8_t"
-        )
+    if len(data_a) > 0xFFFF:
+        raise ValueError("total NNZ must fit the uint16_t CSR row-pointer format")
 
     # Dense reference computation.
     # Accumulate in Python integer precision, then wrap to signed INT8.
@@ -104,7 +105,7 @@ def header_array(name, c_type, values):
     return (
         "#include <stdint.h>\n"
         "static const " + c_type + " " + name + "[" + str(len(physical)) + "]"
-        " __attribute__((aligned(16))) = {\n"
+        " __attribute__((aligned(32))) = {\n"
         + initializer + "\n};\n"
     )
 
@@ -127,8 +128,14 @@ def save(outdir, rows, cols, b_cols, out_bits, arrays):
         f"#define TOTAL_NNZ {len(data_a)}u\n"
         f"#define TOTAL_PTRS {len(row_ptr)}u\n"
         "#define SPMM_OUT_BITS 8\n"
-        "#define SPMM_STREAM_WORD_BYTES 16u\n"
-        "#define SPMM_ROW_PTR_WORDS ((TOTAL_PTRS + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
+        "#define SPMM_STREAM_WORD_BYTES 32u\n"
+        "#define SPMM_ENGINE_LANES 16u\n"
+        "#define SPMM_ENGINE_MACS 16u\n"
+        "#define SPMM_TILE_M SPMM_ENGINE_LANES\n"
+        "#define SPMM_TILE_N SPMM_ENGINE_MACS\n"
+        "#define SPMM_MAX_MATRIX_NNZ (SPMM_M * SPMM_K)\n"
+        "#define SPMM_ROW_PTR_WIDTH_BYTES 2u\n"
+        "#define SPMM_ROW_PTR_WORDS ((TOTAL_PTRS * SPMM_ROW_PTR_WIDTH_BYTES + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
         "#define SPMM_B_WORDS ((SPMM_K * SPMM_N + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
         "#define SPMM_NNZ_WORDS ((TOTAL_NNZ + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
         "#define NUM_ROWS SPMM_M\n#define NUM_COLS SPMM_K\n"
@@ -136,12 +143,12 @@ def save(outdir, rows, cols, b_cols, out_bits, arrays):
         "#endif /* SPMM_TENSOR_DIM_H */\n"
     )
 
-    # The streamer fetches full 128-bit beats.
-    # Pad input arrays to prevent out-of-bounds reads on the last beat.
+    # The streamer fetches full 256-bit (32-byte) beats.
+    # Pad each DMA source so the last beat never reads beyond the C array.
     files = {
         "tensor_dim.h": dims,
         "row_ptr_input.h": header_array(
-            "row_ptr_inp", "uint8_t", pad_to_word(row_ptr)
+            "row_ptr_inp", "uint16_t", pad_to_word(row_ptr, element_bytes=2)
         ),
         "col_id_input.h": header_array(
             "col_id_inp", "uint8_t", pad_to_word(col_id)
@@ -171,7 +178,7 @@ def self_test():
         (4, 7, 4, 1.0, 1, 8, 2),
         (8, 11, 4, 0.9, 8, 8, 3),
         (1, 1, 1, 0.0, 1, 8, -1),
-        (4, 255, 4, 0.99, 6, 8, 0),
+        (16, 32, 16, 0.0, 6, 8, -1),
     ]
 
     for rows, cols, n, sparse, seed, bits, empty in cases:
@@ -213,9 +220,9 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
 
-    parser.add_argument("--rows", type=int, default=16)
-    parser.add_argument("--cols", type=int, default=16)
-    parser.add_argument("--b-cols", type=int, default=16)
+    parser.add_argument("--rows", type=int, default=32)
+    parser.add_argument("--cols", type=int, default=32)
+    parser.add_argument("--b-cols", type=int, default=32)
     parser.add_argument("--sparsity", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=42)
 
