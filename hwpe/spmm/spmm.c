@@ -1,8 +1,8 @@
 /*
- * Single-command 32x32 CSR SpMM regression for an RTL-tiled 16-lane x 16-MAC HWPE.
- * A(32x32, CSR) * B(32x32, INT8) -> C(32x32, INT8).
- * The CPU supplies the complete matrices once; the hardware streamer performs
- * the 2x2 output tiling internally and writes the complete C matrix to TCDM.
+ * Single-command parametric CSR SpMM regression for an RTL-tiled 16x16 HWPE.
+ * Supported square matrix sizes in this delivery: 16, 32, and 64.
+ * The CPU supplies the complete matrices once; RTL iterates over the output
+ * tile grid and writes the complete C matrix back to TCDM.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,8 +22,14 @@
 #include "inc/golden.h"
 #include "utils/spmm_utils.h"
 
-#if (SPMM_M != 32u) || (SPMM_K != 32u) || (SPMM_N != 32u)
-#error "This RTL tile controller currently supports M=K=N=32"
+#if (SPMM_M != SPMM_K) || (SPMM_M != SPMM_N)
+#error "This test configuration currently expects square M=K=N matrices"
+#endif
+#if ((SPMM_M != 16u) && (SPMM_M != 32u) && (SPMM_M != 64u))
+#error "This RTL delivery supports square matrix sizes 16, 32, and 64"
+#endif
+#if ((SPMM_M % SPMM_ENGINE_LANES) != 0) || ((SPMM_N % SPMM_ENGINE_MACS) != 0)
+#error "Matrix dimensions must be multiples of the fixed 16x16 engine tile"
 #endif
 #if SPMM_OUT_BITS != 8
 #error "The current SpMM RTL instance exports 8-bit accumulator results"
@@ -73,7 +79,8 @@ int main(void)
         c = (volatile spmm_output_t *)spmm_l1_alloc(c_bytes);
 
         if (!row_ptr || !col_id || !a || !b || !c) {
-            printf("[SPMM] Not enough L1/TCDM memory for 32x32 hardware-tiled test\n");
+            printf("[SPMM] Not enough L1/TCDM memory for %ux%u hardware-tiled test\n",
+                   (unsigned)SPMM_M, (unsigned)SPMM_N);
             errors = 1;
         } else {
             errors = spmm_check_csr(row_ptr_inp, col_id_inp);
@@ -137,7 +144,10 @@ int main(void)
                 __asm__ volatile("" ::: "memory");
 
                 if (errors == 0) {
-                    printf("[SPMM] Hardware completed the 2x2 tile loop; checking C[32x32]\n");
+                    printf("[SPMM] Hardware completed the %ux%u tile loop; checking C[%ux%u]\n",
+                           (unsigned)(SPMM_M / SPMM_TILE_M),
+                           (unsigned)(SPMM_N / SPMM_TILE_N),
+                           (unsigned)SPMM_M, (unsigned)SPMM_N);
                     errors += spmm_compare(c, golden, SPMM_M * SPMM_N);
                 }
             }
@@ -145,9 +155,11 @@ int main(void)
 
         *(volatile uint32_t *)(uintptr_t)SPMM_TEST_RESULT_ADDR = (uint32_t)errors;
         if (errors)
-            printf("[KO] SPMM 32x32 HARDWARE-TILED TEST FAIL: %d mismatch/error(s)\n", errors);
+            printf("[KO] SPMM %ux%u HARDWARE-TILED TEST FAIL: %d mismatch/error(s)\n",
+                   (unsigned)SPMM_M, (unsigned)SPMM_N, errors);
         else
-            printf("[OK] SPMM 32x32 HARDWARE-TILED TEST SUCCESS: 0 mismatch(es)\n");
+            printf("[OK] SPMM %ux%u HARDWARE-TILED TEST SUCCESS: 0 mismatch(es)\n",
+                   (unsigned)SPMM_M, (unsigned)SPMM_N);
     }
 
     synch_barrier();

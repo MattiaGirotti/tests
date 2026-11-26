@@ -137,7 +137,7 @@ def save(outdir, rows, cols, b_cols, out_bits, arrays):
         "#define SPMM_ROW_PTR_WIDTH_BYTES 2u\n"
         "#define SPMM_ROW_PTR_WORDS ((TOTAL_PTRS * SPMM_ROW_PTR_WIDTH_BYTES + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
         "#define SPMM_B_WORDS ((SPMM_K * SPMM_N + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
-        "#define SPMM_NNZ_WORDS ((TOTAL_NNZ + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES)\n"
+        "#define SPMM_NNZ_WORDS ((TOTAL_NNZ > 0u) ? ((TOTAL_NNZ + SPMM_STREAM_WORD_BYTES - 1u) / SPMM_STREAM_WORD_BYTES) : 1u)\n"
         "#define NUM_ROWS SPMM_M\n#define NUM_COLS SPMM_K\n"
         "#define NUM_B_COLS SPMM_N\n"
         "#endif /* SPMM_TENSOR_DIM_H */\n"

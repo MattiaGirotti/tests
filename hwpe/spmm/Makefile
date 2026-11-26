@@ -1,4 +1,4 @@
-# PULP cluster HWPE regression: 32x32 SpMM with RTL-managed tiling and a 16x16 engine.
+# PULP cluster HWPE regression: square 16/32/64 SpMM with RTL-managed tiling and a 16x16 engine.
 PULP_APP = test
 PULP_APP_SRCS = spmm.c
 PULP_CFLAGS += -O3
@@ -41,7 +41,9 @@ OUT_BITS ?= 8
 EMPTY_ROW ?= -1
 
 .PHONY: golden check-golden all
-# M/K/N must be 32 for the current RTL tile-controller configuration.
+# For this integrated square-matrix HWPE test, use M=K=N=16, 32, or 64.
+# The matching hardware parameter SPMM_MATRIX_SIZE in hwpe_subsystem.sv must
+# be set to the same value before rebuilding the cluster.
 golden:
 	$(PYTHON) spmm-golden-model/golden_model_spmm.py --rows $(M) --cols $(K) --b-cols $(N) --sparsity $(SPARSITY) --seed $(SEED) --out-bits $(OUT_BITS) --empty-row $(EMPTY_ROW) --output-dir inc
 
